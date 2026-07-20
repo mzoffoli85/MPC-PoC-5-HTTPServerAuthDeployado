@@ -54,14 +54,6 @@ jobs:
           docker push "${IMAGE_PATH}:${{ github.sha }}"
           docker push "${IMAGE_PATH}:latest"
 
-      - name: Calcular host público del servicio
-        id: host
-        run: |
-          project_number=$(gcloud projects describe "${{ secrets.GCP_PROJECT_ID }}" --format='value(projectNumber)')
-          host="${{ secrets.GCP_SERVICE_NAME }}-${project_number}.${{ secrets.GCP_REGION }}.run.app"
-          echo "host=$host" >> "$GITHUB_OUTPUT"
-          echo "Host esperado: $host"
-
       - name: Deploy a Cloud Run
         run: |
           gcloud run deploy "${{ secrets.GCP_SERVICE_NAME }}" \
@@ -71,10 +63,9 @@ jobs:
             --allow-unauthenticated \
             --service-account="${{ secrets.GCP_RUNTIME_SA }}" \
             --set-secrets="AUTH_TOKEN=${{ secrets.GCP_AUTH_TOKEN_SECRET_NAME }}:latest" \
-            --set-env-vars="MCP_ALLOWED_HOSTS=${{ steps.host.outputs.host }}" \
             --quiet
 
-      - name: Obtener URL del servicio
+      - name: Obtener URL real del servicio
         id: deployed
         run: |
           url=$(gcloud run services describe "${{ secrets.GCP_SERVICE_NAME }}" \
@@ -82,6 +73,21 @@ jobs:
             --format='value(status.url)')
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "Deployed to: $url"
+
+      - name: Fijar MCP_ALLOWED_HOSTS con el host real (evita adivinar el formato de URL)
+        run: |
+          # Cloud Run usa distintos formatos de URL según el proyecto/región
+          # (con hash "*-xxxxx-uc.a.run.app" o simplificado "*-<numero>.region.run.app").
+          # En vez de adivinar el formato, se lo pide a la propia API y se limpia el esquema.
+          host="${DEPLOYED_URL#https://}"
+          host="${host#http://}"
+          gcloud run services update "${{ secrets.GCP_SERVICE_NAME }}" \
+            --region="${{ secrets.GCP_REGION }}" \
+            --update-env-vars="MCP_ALLOWED_HOSTS=${host}" \
+            --quiet
+          echo "MCP_ALLOWED_HOSTS=$host"
+        env:
+          DEPLOYED_URL: ${{ steps.deployed.outputs.url }}
 
       - name: Smoke test — /health responde 200
         run: |

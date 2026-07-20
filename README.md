@@ -62,8 +62,12 @@ auth, así que solo se nota con un token válido (sin token, `auth.py` corta ant
 llegar a esa capa, y parece que todo funciona).
 
 Se soluciona pasando el hostname público real vía la variable `MCP_ALLOWED_HOSTS`
-(ver `server.py`). El workflow de CI la calcula y setea solo — ver la sección de
-abajo.
+(ver `server.py`). Importante: **el formato de la URL de Cloud Run no es siempre el
+mismo** — según el proyecto/región puede ser el formato con hash
+(`servicio-xxxxx-uc.a.run.app`) o el simplificado (`servicio-<numero-proyecto>.region.run.app`).
+No conviene armarlo a mano/adivinarlo — el workflow de CI le pregunta a la propia API
+de Cloud Run cuál es la URL real después del deploy y recién ahí setea
+`MCP_ALLOWED_HOSTS` con ese valor (ver sección CI/CD abajo).
 
 ## Fase 3 — Deployment a Cloud Run
 
@@ -99,26 +103,31 @@ curl http://localhost:8080/health   # 200
    gcloud builds submit --tag us-central1-docker.pkg.dev/<TU_PROJECT_ID>/poc-repo/poc5-mcp-http-remote:latest .
    ```
 
-4. **Deploy a Cloud Run**, inyectando el secret como variable de entorno. El proyecto
-   number se necesita para armar el hostname público (ver el gotcha de la sección
-   anterior — sin `MCP_ALLOWED_HOSTS` correcto, el server rechaza toda request
-   autenticada con 421):
+4. **Deploy a Cloud Run**, inyectando el secret como variable de entorno:
    ```bash
-   PROJECT_NUMBER=$(gcloud projects describe <TU_PROJECT_ID> --format='value(projectNumber)')
-   HOST="poc5-mcp-http-remote-${PROJECT_NUMBER}.us-central1.run.app"
-
    gcloud run deploy poc5-mcp-http-remote \
      --image us-central1-docker.pkg.dev/<TU_PROJECT_ID>/poc-repo/poc5-mcp-http-remote:latest \
      --region us-central1 \
      --allow-unauthenticated \
-     --set-secrets AUTH_TOKEN=poc5-auth-token:latest \
-     --set-env-vars MCP_ALLOWED_HOSTS="$HOST"
+     --set-secrets AUTH_TOKEN=poc5-auth-token:latest
    ```
    - `--allow-unauthenticated`: el endpoint queda público a nivel red (Cloud Run IAM),
      pero sigue exigiendo el bearer token propio vía `auth.py`. Es el modelo esperado
      para un MCP server remoto consumido por distintos clientes.
    - Cloud Run inyecta `$PORT` automáticamente; `server.py` ya lo respeta.
    - Cloud Run da HTTPS por defecto — no hay que gestionar TLS.
+
+   Después del primer deploy, **preguntale a Cloud Run cuál es la URL real** y seteala
+   como `MCP_ALLOWED_HOSTS` (no la armes a mano — el formato de URL varía según el
+   proyecto/región, ver el gotcha de la sección anterior):
+   ```bash
+   URL=$(gcloud run services describe poc5-mcp-http-remote --region us-central1 --format='value(status.url)')
+   HOST="${URL#https://}"
+
+   gcloud run services update poc5-mcp-http-remote \
+     --region us-central1 \
+     --update-env-vars MCP_ALLOWED_HOSTS="$HOST"
+   ```
 
 5. **Registrar la URL pública en el CLI**:
    ```bash
@@ -140,11 +149,12 @@ Workflow: [`.github/workflows/deploy-cloud-run.yml`](.github/workflows/deploy-cl
 
 Se dispara cuando una Pull Request contra `main` es **mergeada**
 (`pull_request.types: closed` + guard `github.event.pull_request.merged == true` — un
-cierre sin mergear no dispara nada). Hace: calcula el hostname público del servicio y lo
-pasa como `MCP_ALLOWED_HOSTS` (ver el gotcha de Fase 2), build de la imagen, push a
-Artifact Registry, `gcloud run deploy`, y tres smoke tests contra la URL pública
-(`/health` → 200, `/mcp` sin token → 401, `/mcp` con token real → 200 con handshake MCP
-completo).
+cierre sin mergear no dispara nada). Hace: build de la imagen, push a Artifact Registry,
+`gcloud run deploy`, le pregunta a la API cuál es la URL real del servicio y la setea
+como `MCP_ALLOWED_HOSTS` (ver el gotcha de Fase 2 — el formato de URL de Cloud Run varía
+según el proyecto, por eso se pide en runtime en vez de armarlo a mano), y corre tres
+smoke tests contra la URL pública (`/health` → 200, `/mcp` sin token → 401, `/mcp` con
+token real → 200 con handshake MCP completo).
 
 Los pasos 2 y 3 de la sección anterior (Secret Manager + Artifact Registry repo) son
 **setup único**, hacelos una sola vez a mano antes del primer merge. El pipeline asume que
