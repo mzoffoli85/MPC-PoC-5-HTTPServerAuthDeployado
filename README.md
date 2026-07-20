@@ -51,6 +51,20 @@ Implementada en `auth.py` (`BearerAuthMiddleware`, Starlette `BaseHTTPMiddleware
 - Header ausente/inválido → 401 + `WWW-Authenticate: Bearer`.
 - `/health` queda exento (whitelist explícita) para health checks del orquestador.
 
+### Gotcha: el SDK `mcp` tiene su propia protección anti DNS-rebinding
+
+Además de nuestro `auth.py`, `FastMCP` trae activada por default una protección anti
+DNS-rebinding (`mcp/server/transport_security.py`) que valida el header `Host` de cada
+request contra una whitelist. **Esa whitelist viene hardcodeada por el SDK solo a
+`localhost` / `127.0.0.1` / `[::1]`.** Contra cualquier otro hostname (como el de Cloud
+Run), rechaza con `421 Invalid Host header` — *después* de pasar nuestro propio bearer
+auth, así que solo se nota con un token válido (sin token, `auth.py` corta antes de
+llegar a esa capa, y parece que todo funciona).
+
+Se soluciona pasando el hostname público real vía la variable `MCP_ALLOWED_HOSTS`
+(ver `server.py`). El workflow de CI la calcula y setea solo — ver la sección de
+abajo.
+
 ## Fase 3 — Deployment a Cloud Run
 
 ### Build local (ya probado)
@@ -85,13 +99,20 @@ curl http://localhost:8080/health   # 200
    gcloud builds submit --tag us-central1-docker.pkg.dev/<TU_PROJECT_ID>/poc-repo/poc5-mcp-http-remote:latest .
    ```
 
-4. **Deploy a Cloud Run**, inyectando el secret como variable de entorno:
+4. **Deploy a Cloud Run**, inyectando el secret como variable de entorno. El proyecto
+   number se necesita para armar el hostname público (ver el gotcha de la sección
+   anterior — sin `MCP_ALLOWED_HOSTS` correcto, el server rechaza toda request
+   autenticada con 421):
    ```bash
+   PROJECT_NUMBER=$(gcloud projects describe <TU_PROJECT_ID> --format='value(projectNumber)')
+   HOST="poc5-mcp-http-remote-${PROJECT_NUMBER}.us-central1.run.app"
+
    gcloud run deploy poc5-mcp-http-remote \
      --image us-central1-docker.pkg.dev/<TU_PROJECT_ID>/poc-repo/poc5-mcp-http-remote:latest \
      --region us-central1 \
      --allow-unauthenticated \
-     --set-secrets AUTH_TOKEN=poc5-auth-token:latest
+     --set-secrets AUTH_TOKEN=poc5-auth-token:latest \
+     --set-env-vars MCP_ALLOWED_HOSTS="$HOST"
    ```
    - `--allow-unauthenticated`: el endpoint queda público a nivel red (Cloud Run IAM),
      pero sigue exigiendo el bearer token propio vía `auth.py`. Es el modelo esperado
@@ -119,9 +140,11 @@ Workflow: [`.github/workflows/deploy-cloud-run.yml`](.github/workflows/deploy-cl
 
 Se dispara cuando una Pull Request contra `main` es **mergeada**
 (`pull_request.types: closed` + guard `github.event.pull_request.merged == true` — un
-cierre sin mergear no dispara nada). Hace: build de la imagen, push a Artifact Registry,
-`gcloud run deploy`, y dos smoke tests contra la URL pública (`/health` → 200, `/mcp` sin
-token → 401).
+cierre sin mergear no dispara nada). Hace: calcula el hostname público del servicio y lo
+pasa como `MCP_ALLOWED_HOSTS` (ver el gotcha de Fase 2), build de la imagen, push a
+Artifact Registry, `gcloud run deploy`, y tres smoke tests contra la URL pública
+(`/health` → 200, `/mcp` sin token → 401, `/mcp` con token real → 200 con handshake MCP
+completo).
 
 Los pasos 2 y 3 de la sección anterior (Secret Manager + Artifact Registry repo) son
 **setup único**, hacelos una sola vez a mano antes del primer merge. El pipeline asume que

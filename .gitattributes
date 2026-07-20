@@ -1,0 +1,4 @@
+# Normaliza los finales de línea a LF en el repo, independientemente de la config
+# local de Git (core.autocrlf). Evita el warning de LF/CRLF en Windows y previene
+# que algún script termine con CRLF dentro de la imagen Docker (que corre Linux).
+* text=auto eol=lf

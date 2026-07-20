@@ -54,6 +54,14 @@ jobs:
           docker push "${IMAGE_PATH}:${{ github.sha }}"
           docker push "${IMAGE_PATH}:latest"
 
+      - name: Calcular host público del servicio
+        id: host
+        run: |
+          project_number=$(gcloud projects describe "${{ secrets.GCP_PROJECT_ID }}" --format='value(projectNumber)')
+          host="${{ secrets.GCP_SERVICE_NAME }}-${project_number}.${{ secrets.GCP_REGION }}.run.app"
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+          echo "Host esperado: $host"
+
       - name: Deploy a Cloud Run
         run: |
           gcloud run deploy "${{ secrets.GCP_SERVICE_NAME }}" \
@@ -63,6 +71,7 @@ jobs:
             --allow-unauthenticated \
             --service-account="${{ secrets.GCP_RUNTIME_SA }}" \
             --set-secrets="AUTH_TOKEN=${{ secrets.GCP_AUTH_TOKEN_SECRET_NAME }}:latest" \
+            --set-env-vars="MCP_ALLOWED_HOSTS=${{ steps.host.outputs.host }}" \
             --quiet
 
       - name: Obtener URL del servicio
@@ -94,3 +103,31 @@ jobs:
             exit 1
           fi
           echo "Auth check OK: endpoint protegido"
+
+      - name: Obtener token de Secret Manager (para el smoke test autenticado)
+        id: token
+        run: |
+          token=$(gcloud secrets versions access latest --secret="${{ secrets.GCP_AUTH_TOKEN_SECRET_NAME }}")
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test — /mcp con token válido completa el handshake (200)
+        run: |
+          response=$(curl -s -w '\n%{http_code}' -X POST "${{ steps.deployed.outputs.url }}/mcp" \
+            -H "Authorization: Bearer ${{ steps.token.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci-smoketest","version":"1.0"}}}')
+          status="${response##*$'\n'}"
+          body="${response%$'\n'*}"
+          if [ "$status" != "200" ]; then
+            echo "Se esperaba 200 con token válido, se obtuvo HTTP $status"
+            echo "$body"
+            exit 1
+          fi
+          if ! echo "$body" | grep -q '"serverInfo"'; then
+            echo "Respondió 200 pero sin handshake MCP válido en el body"
+            echo "$body"
+            exit 1
+          fi
+          echo "Auth + MCP handshake OK con token válido"
