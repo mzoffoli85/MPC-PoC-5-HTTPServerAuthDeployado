@@ -1,0 +1,96 @@
+name: Build & Deploy to Cloud Run
+
+# Se dispara cuando un Pull Request contra main es aceptado (merged).
+# github.event.pull_request.merged == true distingue "aceptado" de "cerrado sin mergear".
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+
+# Evita que dos deploys se pisen si se mergean varias PRs seguidas; los encola en vez de cancelarlos.
+concurrency:
+  group: cloud-run-deploy-poc5
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE_PATH: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_ARTIFACT_REPO }}/${{ secrets.GCP_SERVICE_NAME }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Autenticar contra GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configurar gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Configurar auth de Docker para Artifact Registry
+        run: gcloud auth configure-docker "${{ secrets.GCP_REGION }}-docker.pkg.dev" --quiet
+
+      - name: Build de la imagen
+        run: |
+          docker build \
+            -t "${IMAGE_PATH}:${{ github.sha }}" \
+            -t "${IMAGE_PATH}:latest" \
+            .
+
+      - name: Push de la imagen a Artifact Registry
+        run: |
+          docker push "${IMAGE_PATH}:${{ github.sha }}"
+          docker push "${IMAGE_PATH}:latest"
+
+      - name: Deploy a Cloud Run
+        run: |
+          gcloud run deploy "${{ secrets.GCP_SERVICE_NAME }}" \
+            --image="${IMAGE_PATH}:${{ github.sha }}" \
+            --region="${{ secrets.GCP_REGION }}" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --service-account="${{ secrets.GCP_RUNTIME_SA }}" \
+            --set-secrets="AUTH_TOKEN=${{ secrets.GCP_AUTH_TOKEN_SECRET_NAME }}:latest" \
+            --quiet
+
+      - name: Obtener URL del servicio
+        id: deployed
+        run: |
+          url=$(gcloud run services describe "${{ secrets.GCP_SERVICE_NAME }}" \
+            --region="${{ secrets.GCP_REGION }}" \
+            --format='value(status.url)')
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed to: $url"
+
+      - name: Smoke test — /health responde 200
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.deployed.outputs.url }}/health")
+          if [ "$status" != "200" ]; then
+            echo "Health check falló: HTTP $status"
+            exit 1
+          fi
+          echo "Health check OK"
+
+      - name: Smoke test — /mcp rechaza sin token (401)
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${{ steps.deployed.outputs.url }}/mcp" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci-smoketest","version":"1.0"}}}')
+          if [ "$status" != "401" ]; then
+            echo "Se esperaba 401 sin token, se obtuvo HTTP $status"
+            exit 1
+          fi
+          echo "Auth check OK: endpoint protegido"
