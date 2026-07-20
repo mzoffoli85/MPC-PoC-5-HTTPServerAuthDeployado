@@ -261,3 +261,6 @@ el pipeline falla (no queda un deploy roto en verde).
 | Auth | ninguna (confía en el proceso padre) | bearer token obligatorio |
 | Estado | vive en el proceso | `stateless_http=True`, sin estado entre requests |
 | Deploy | "corre en mi máquina" | contenedor en Cloud Run, HTTPS, escalable |
+<img width="884" height="216" alt="1" src="https://github.com/user-attachments/assets/2a092c1d-a357-48c5-aea8-d26d36299a14" />
+<img width="873" height="289" alt="2" src="https://github.com/user-attachments/assets/a3e6202c-c672-4766-97c5-f1cc5a871903" />
+<img width="881" height="181" alt="3" src="https://github.com/user-attachments/assets/7d4fbc43-eac9-4e5e-8355-22e58571bf52" />
