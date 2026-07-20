@@ -74,18 +74,28 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "Deployed to: $url"
 
-      - name: Fijar MCP_ALLOWED_HOSTS con el host real (evita adivinar el formato de URL)
+      - name: Fijar MCP_ALLOWED_HOSTS con los hosts reales del servicio
         run: |
-          # Cloud Run usa distintos formatos de URL según el proyecto/región
-          # (con hash "*-xxxxx-uc.a.run.app" o simplificado "*-<numero>.region.run.app").
-          # En vez de adivinar el formato, se lo pide a la propia API y se limpia el esquema.
-          host="${DEPLOYED_URL#https://}"
-          host="${host#http://}"
+          # Cloud Run puede exponer el MISMO servicio bajo dos URLs públicas válidas a
+          # la vez: la que devuelve `status.url` (a veces con hash, "*-xxxxx-uc.a.run.app")
+          # y la forma simplificada "*-<numero-de-proyecto>.<region>.run.app". Ambas
+          # resuelven al mismo backend, así que se permiten las dos en vez de adivinar
+          # cuál es "la" URL.
+          url_host="${DEPLOYED_URL#https://}"
+          url_host="${url_host#http://}"
+
+          project_number=$(gcloud projects describe "${{ secrets.GCP_PROJECT_ID }}" --format='value(projectNumber)')
+          alt_host="${{ secrets.GCP_SERVICE_NAME }}-${project_number}.${{ secrets.GCP_REGION }}.run.app"
+
+          allowed_hosts="${url_host},${alt_host}"
+
+          # "^;^" cambia el separador de pares KEY=VALUE de gcloud de "," a ";", porque
+          # el valor de MCP_ALLOWED_HOSTS ya usa comas para separar los dos hosts.
           gcloud run services update "${{ secrets.GCP_SERVICE_NAME }}" \
             --region="${{ secrets.GCP_REGION }}" \
-            --update-env-vars="MCP_ALLOWED_HOSTS=${host}" \
+            --update-env-vars="^;^MCP_ALLOWED_HOSTS=${allowed_hosts}" \
             --quiet
-          echo "MCP_ALLOWED_HOSTS=$host"
+          echo "MCP_ALLOWED_HOSTS=$allowed_hosts"
         env:
           DEPLOYED_URL: ${{ steps.deployed.outputs.url }}
 
